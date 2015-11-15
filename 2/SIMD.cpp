@@ -6,10 +6,8 @@
 #include <Windows.h>
 #include <intrin.h>
 #include <math.h>
-//#include <algorithm>
 
 #define N 256
-
 // Time
 double PCFreq = 0.0;
 __int64 CounterStart = 0;
@@ -35,11 +33,30 @@ double GetCounter()
 
 bool areEqual(double x, double y)
 {
-	static double SMALL_NUM = 1.0E-5;
+	static double SMALL_NUM = 1.0E-7;
 	if (abs(x) < SMALL_NUM && abs(y) < SMALL_NUM)
 		return abs(x - y) < SMALL_NUM;
 	else
 		return abs(x - y) < abs(x) * SMALL_NUM;
+}
+
+void avx_support(){
+	int cpuInfo[4];
+	__cpuidex(cpuInfo, 1, 0);
+	bool avxSupported = cpuInfo[2] & 1 << 28;
+	if (avxSupported)
+	{
+		printf("AVX is supported by __cpuid\n");
+	}
+	else
+	{
+		printf("AVX is NOT supported by __cpuid\n");
+	}
+#ifdef __AVX__
+	printf("AVX is supported by DEBUG\n");
+#else
+	printf("AVX is NOT supported by DEBUG\n");
+#endif
 }
 
 void max_of_matrix(double* matrix, int rows, int cols, double* max, int* row, int* col){
@@ -58,111 +75,68 @@ void max_of_matrix(double* matrix, int rows, int cols, double* max, int* row, in
 	}
 }
 
-void max_of_matrix_only_max(double* matrix, int rows, int cols, double* max){
-	*max = -1;
-	for (int i = 0; i < rows; ++i){
-		for (int j = 0; j < cols; ++j){
-			if (*max >= matrix[i*rows + j]){
-				continue;
-			}
-			*max = matrix[i*rows + j];
-		}
-	}
-}
 
-void simd_max_of_matrix(double* matrix, int rows, int cols, double* max, int* row, int* col)
+void sse_max_of_matrix(double* matrix, int rows, int cols, double* max, int* row, int* col)
 {
-	__m128d *pa = (__m128d *)matrix;
-	__m128d m = pa[0];
-	__m128d temp;
+	__m128d *pa = (__m128d *)matrix, m = pa[0];
 	int len = rows*cols / 2;
-	int index1=0,index2=0;
 	for (int i = 1; i < len; i++)
 	{
 		m = _mm_max_pd(m, pa[i]);
-		if (m.m128d_f64[0] == pa[i].m128d_f64[0])
-		{
-			index1 = i;
-		}
-		if (m.m128d_f64[1] == pa[i].m128d_f64[1])
-		{
-			index2 = i;
-		}
 	}
-	
-	if (m.m128d_f64[1] > m.m128d_f64[0]){
-		*max = m.m128d_f64[1];
-		*row = (int)(index2 / (rows/2));
-		*col = (index2*2)%cols;
-		*col += 1;
-	}
-	else
+
+	*max = m.m128d_f64[0];
+	if (m.m128d_f64[1]>*max)
 	{
-		*row = (int)(index1 / (rows/2));
-		*col = (index1*2)%cols;
-		*max = m.m128d_f64[0];
+		*max = m.m128d_f64[1];
 	}
-	//*max = m.m128d_f64[0]>m.m128d_f64[1] ? m.m128d_f64[0] : m.m128d_f64[1];
+	len /= 2;
+	for (int i = 0; i < len; i++)
+	{
+		if (matrix[i]== *max)
+		{
+			*row = i / rows;
+			*col = i % cols;
+			break;
+		}
+	}
 }
 
-void simd_max_of_matrix_only_max(double* matrix, int rows, int cols, double* max)
+
+void avx_max_of_matrix(double* matrix, int rows, int cols, double* max, int* row, int* col)
 {
-	__m128d *pa = (__m128d *)matrix;
-	__m128d m = pa[0];
-	int len = rows*cols/2;
+	__m256d *pa = (__m256d *)matrix, m = pa[0];
+	int len = rows*cols / 4;
 	for (int i = 1; i < len; i++)
 	{
-		m = _mm_max_pd(m, pa[i]);
+		m = _mm256_max_pd(m, pa[i]);
 	}
-	*max = m.m128d_f64[0]>m.m128d_f64[1] ? m.m128d_f64[0] : m.m128d_f64[1];
+
+	*max = m.m256d_f64[0];
+	for (int i = 1; i < 4; i++)
+	{
+		if (*max < m.m256d_f64[i])
+		{
+			*max = m.m256d_f64[i];
+		}
+	}
+	len /= 4;
+	for (int i = 0; i < len; i++)
+	{
+		if (matrix[i] == *max)
+		{
+			*row = i / rows;
+			*col = i % cols;
+			break;
+		}
+	}
 }
+
 
 
 void test_max()
 {
-	int R[] = {64,128,256,512,1024,2048};
-	for (int r = 0; r < 6; r++)
-	{
-		int len = R[r];
-		double* matrix = (double*)_aligned_malloc(sizeof(double)*len*len, 16);
-		for (int i = 0; i < len; ++i){
-			for (int j = 0; j < len; ++j){
-				matrix[i*len + j] = (double)(rand() % 100);
-			}
-		}
-		matrix[len * len / 2 + len / 2] = 100.0; // maximum
-
-		double max;
-		int row;
-		int col;
-
-		_tcprintf(_T("-------------- %d ---------------\n"), len);
-
-		StartCounter();
-		max_of_matrix(matrix, len, len, &max, &row, &col);
-		float time_end = GetCounter();
-		_tcprintf(_T("Max value = %.1f [%d,%d]\n"), max, row, col);
-		_tcprintf(_T("Time for %d x %d: %f ms\n\n"), len, len, time_end);
-
-		StartCounter();
-		simd_max_of_matrix(matrix, len, len, &max, &row, &col);
-		time_end = GetCounter();
-		_tcprintf(_T("Max value = %.1f [%d,%d]\n"), max, row, col);
-		_tcprintf(_T("Time SIMD for %d x %d: %f ms\n"), len, len, time_end);
-
-		StartCounter();
-		simd_max_of_matrix_only_max(matrix, len, len, &max);
-		time_end = GetCounter();
-		_tcprintf(_T("Max value = %.1f\n"), max);
-		_tcprintf(_T("Time SIMD only max for %d x %d: %f ms\n"), len, len, time_end);
-		
-	}
-	
-}
-
-void test_max_only()
-{
-	int R[] = { 64, 128, 256, 512, 1024, 2048, 4096,8192};
+	int R[] = {64,128,256,512,1024,2048,4096,8192};
 	for (int r = 0; r < 8; r++)
 	{
 		int len = R[r];
@@ -172,29 +146,37 @@ void test_max_only()
 				matrix[i*len + j] = (double)(rand() % 100);
 			}
 		}
-		matrix[len * len / 2 + len / 2] = 100.0; // maximum
 
 		double max;
 		int row;
 		int col;
 
-		_tcprintf(_T("-------------- %d ---------------\n"), len);
+		_tcprintf(_T("---------------------------- %d x %d -----------------------------\n"), len,len);
 
 		StartCounter();
-		max_of_matrix_only_max(matrix, len, len, &max);
-		float time_end = GetCounter();
-		_tcprintf(_T("Max value = %.1f\n"), max);
-		_tcprintf(_T("Time for %d x %d: %f ms\n\n"), len, len, time_end);
+		max_of_matrix(matrix, len, len, &max, &row, &col);
+		double time_end = GetCounter();
+		_tcprintf(_T("Max value = %.1f [%d,%d]    \t"), max, row, col);
+		_tcprintf(_T("Time:    \t %f ms\n\n"),time_end);
 
 		StartCounter();
-		simd_max_of_matrix_only_max(matrix, len, len, &max);
+		sse_max_of_matrix(matrix, len, len, &max, &row, &col);
 		time_end = GetCounter();
-		_tcprintf(_T("Max value = %.1f\n"), max);
-		_tcprintf(_T("Time SIMD only max for %d x %d: %f ms\n"), len, len, time_end);
+		_tcprintf(_T("Max value = %.1f [%d,%d]    \t"), max, row, col);
+		_tcprintf(_T("Time SSE:\t %f ms\n\n"),  time_end);
 
+#ifdef __AVX__	
+			StartCounter();
+			avx_max_of_matrix(matrix, len, len, &max, &row, &col);
+			time_end = GetCounter();
+			_tcprintf(_T("Max value = %.1f [%d,%d]    \t"), max, row, col);
+			_tcprintf(_T("Time AVX:\t %f ms\n"), time_end);
+#endif
+		_aligned_free(matrix);
 	}
-
+	
 }
+
 
 void print_vector(double* v, int rows)
 {
@@ -234,7 +216,7 @@ void matrix_mul_vector(double* matrix, double* vector, int rows, int cols, doubl
 	}
 }
 
-void matrix_mul_vector_simd(double* matrix, double* vector, int rows, int cols, double* res){
+void matrix_mul_vector_sse(double* matrix, double* vector, int rows, int cols, double* res){
 	__m128d *m = (__m128d*)matrix, *v = (__m128d*)vector, *r = (__m128d*)res;
 	for (int j = 0; j < cols / 2; j++)
 	{
@@ -245,6 +227,21 @@ void matrix_mul_vector_simd(double* matrix, double* vector, int rows, int cols, 
 	for (int i = 0; i < len; i+=cols/2){
 		for (int j = 0; j < cols/2; ++j){
 			r[j] = _mm_add_pd(r[j], _mm_mul_pd(m[i + j], v[j]));
+		}
+	}
+}
+
+void matrix_mul_vector_avx(double* matrix, double* vector, int rows, int cols, double* res){
+	__m256d *m = (__m256d*)matrix, *v = (__m256d*)vector, *r = (__m256d*)res;
+	for (int j = 0; j < cols / 4; j++)
+	{
+		r[j] = _mm256_setzero_pd();
+	}
+
+	int len = rows*cols / 4;
+	for (int i = 0; i < len; i += cols / 4){
+		for (int j = 0; j < cols / 4; ++j){
+			r[j] = _mm256_add_pd(r[j], _mm256_mul_pd(m[i + j], v[j]));
 		}
 	}
 }
@@ -281,6 +278,7 @@ void test_mul_vector()
 		double* vector = (double*)_aligned_malloc(sizeof(double)* len, 16);
 		double* res = (double*)_aligned_malloc(sizeof(double)* len, 16);
 		double* res2 = (double*)_aligned_malloc(sizeof(double)* len, 16);
+		
 		for (int i = 0; i < len; ++i){
 			vector[i] = (double)(rand() % 3);
 			for (int j = 0; j < len; ++j){
@@ -291,15 +289,31 @@ void test_mul_vector()
 		_tcprintf(_T("-------------- %d ---------------\n"), len);
 		StartCounter();
 		matrix_mul_vector(matrix, vector, len, len, res);
-		float time_end = GetCounter();
+		double time_end = GetCounter();
 		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms\n"), len, len, len, time_end);
 
 		StartCounter();
-		matrix_mul_vector_simd(matrix, vector, len, len, res2);
+		matrix_mul_vector_sse(matrix, vector, len, len, res2);
 		time_end = GetCounter();
-		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms\n"), len, len, len, time_end);
+		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (SSE)\n"), len, len, len, time_end);
 
-		_tcprintf(_T("Count of different elements: %d\n\n"), compare_vector(res, res2, len));
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res, res2, len));
+
+#ifdef __AVX__	
+		double* res3 = (double*)_aligned_malloc(sizeof(double)* len, 16);
+		StartCounter();
+		matrix_mul_vector_avx(matrix, vector, len, len, res3);
+		time_end = GetCounter();
+		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (AVX)\n"), len, len, len, time_end);
+
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res, res3, len));
+		_aligned_free(res3);
+#endif
+		_aligned_free(matrix);
+		_aligned_free(vector);
+		_aligned_free(res);
+		_aligned_free(res2);
+		
 	}
 }
 
@@ -310,24 +324,41 @@ void matrix_mul_matrix(double* matrix1, double* matrix2, double* res, int n){
 			r = matrix1[i*n + j];
 			for (int k = 0; k < n; k++){
 				res[i*n+k] += r*matrix2[j*n+k];
-				//res[i*n+j] += matrix1[i*n+k] * matrix2[k*n+j];
 			}
 		}
 	}
 }
 
-void matrix_mul_matrix_simd(double* matrix1, double* matrix2, double* res, int n){
-	__m128d *m1 = (__m128d*)matrix1, *m2 = (__m128d*)matrix2, *r = (__m128d*)res;
+void matrix_mul_matrix_sse(double* matrix1, double* matrix2, double* res, int n){
+	__m128d *m2 = (__m128d*)matrix2, *arr = (__m128d*)res;
 	__m128d temp;
-	int len = n*n / 2;
-	for (int i = 0; i < len; i+=n/2){
-		for (int j = 0; j < n; j++){
-			temp = _mm_setr_pd(0, 0);
-			for (int k = i; k < i + n / 2; i++)
-			{
-				temp = _mm_add_pd(temp, _mm_mul_pd(m1[k], m2[k+j*n/2]));
+	double r;
+	int len = n / 2;
+	for (int i = 0; i < n; i++){
+		for (int j = 0; j < n; ++j){
+			r = matrix1[i*n + j];
+			for (int k = 0; k < len; k++){
+				temp = _mm_set1_pd(r);
+				arr[i * len + k] = _mm_add_pd(arr[i* len + k],
+					_mm_mul_pd(temp, m2[j * len + k]));
 			}
-			res[i/2+j] = temp.m128d_f64[0] + temp.m128d_f64[1];
+		}
+	}
+}
+
+void matrix_mul_matrix_avx(double* matrix1, double* matrix2, double* res, int n){
+	__m256d *m2 = (__m256d*)matrix2, *arr = (__m256d*)res;
+	__m256d temp;
+	double r;
+	int len = n / 4;
+	for (int i = 0; i < n; i++){
+		for (int j = 0; j < n; ++j){
+			r = matrix1[i*n + j];
+			for (int k = 0; k < len; k++){
+				temp = _mm256_set1_pd(r);
+				arr[i*len + k] = _mm256_add_pd(arr[i*len + k],
+					_mm256_mul_pd(temp, m2[j*len + k]));
+			}
 		}
 	}
 }
@@ -355,22 +386,44 @@ void test_mul_matrix()
 		_tcprintf(_T("-------------- %d ---------------\n"), len);
 		StartCounter();
 		matrix_mul_matrix(matrix1, matrix2, res, len);
-		float time_end = GetCounter();
+		double time_end = GetCounter();
 		_tcprintf(_T("Time for multiple matrix %d x %d: %f ms\n"), len, len, time_end);
 
 		StartCounter();
-		matrix_mul_matrix(matrix1, matrix2, res2, len);
+		matrix_mul_matrix_sse(matrix1, matrix2, res2, len);
 		time_end = GetCounter();
-		_tcprintf(_T("Time SIMD for multiple matrix %d x %d: %f ms\n"), len, len, time_end);
+		_tcprintf(_T("Time for multiple matrix %d x %d: %f ms (SSE)\n"), len, len, time_end);
 
-		_tcprintf(_T("Count of different elements: %d\n\n"), compare_matrix(res, res2, len));
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_matrix(res, res2, len));
+
+
+#ifdef __AVX__	
+		double* res3 = (double*)_aligned_malloc(sizeof(double)* len*len, 16);
+		for (int i = 0; i < len; ++i){
+			for (int j = 0; j < len; ++j){
+				res3[i*len+j]=0.0;
+			}}
+		StartCounter();
+		matrix_mul_matrix_avx(matrix1, matrix2, res3, len);
+		time_end = GetCounter();
+		_tcprintf(_T("Time for multiple matrix %d x %d: %f ms (AVX)\n"), len, len, time_end);
+
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_matrix(res, res3, len));
+		_aligned_free(res3);
+#endif
+
+
+		_aligned_free(matrix1);
+		_aligned_free(matrix2);
+		_aligned_free(res);
+		_aligned_free(res2);
 	}
 }
 int _tmain(int argc, _TCHAR* argv[])
 {
-	srand(time(0));
+	srand((unsigned int)time(0));
+	avx_support();
 	//test_max();
-	//test_max_only();
 	//test_mul_vector();
 	test_mul_matrix();
 	return 0;
