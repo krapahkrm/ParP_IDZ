@@ -7,6 +7,8 @@
 #include <intrin.h>
 #include <omp.h>
 #include <time.h>
+#include <ppl.h>
+using namespace Concurrency;
 
 #pragma region Settings
 bool avxSupported;
@@ -44,7 +46,7 @@ bool areEqual(double x, double y)
 bool areEqualMany(double x, double y)
 {
 	static double SMALL_NUM = 1.0E-2;
-	if (abs(x - y) / max(x, y) < SMALL_NUM) return true;
+	if ((abs(x - y) / max(x, y)) < SMALL_NUM) return true;
 	return false;
 }
 void avx_support(){
@@ -323,7 +325,6 @@ void matrix_mul_vector(double* matrix, double* vector, int rows, int cols, doubl
 }
 
 void omp_matrix_mul_vector(double* matrix, double* vector, int rows, int cols, double* res){
-#pragma omp parallel for
 	for (int i = 0; i < rows; i++)
 	{
 		res[i] = 0;
@@ -335,6 +336,18 @@ void omp_matrix_mul_vector(double* matrix, double* vector, int rows, int cols, d
 			res[j] += matrix[i*rows + j] * vector[j];
 		}
 	}
+}
+
+void ppl_matrix_mul_vector(double* matrix, double* vector, int rows, int cols, double* res){
+	for (int i = 0; i < rows; i++)
+	{
+		res[i] = 0;
+	}
+	Concurrency::parallel_for(int(0), rows, [&](int i){
+		for (int j = 0; j < cols; ++j){
+			res[j] += matrix[i*rows + j] * vector[j];
+		}
+	});
 }
 
 void matrix_mul_vector_sse(double* matrix, double* vector, int rows, int cols, double* res){
@@ -354,7 +367,6 @@ void matrix_mul_vector_sse(double* matrix, double* vector, int rows, int cols, d
 
 void omp_matrix_mul_vector_sse(double* matrix, double* vector, int rows, int cols, double* res){
 	__m128d *m = (__m128d*)matrix, *v = (__m128d*)vector, *r = (__m128d*)res;
-#pragma omp parallel for
 	for (int j = 0; j < cols / 2; j++)
 	{
 		r[j] = _mm_setr_pd(0, 0);
@@ -368,6 +380,22 @@ void omp_matrix_mul_vector_sse(double* matrix, double* vector, int rows, int col
 			r[j] = _mm_add_pd(r[j], _mm_mul_pd(m[i + j], v[j]));
 		}
 	}
+}
+
+void ppl_matrix_mul_vector_sse(double* matrix, double* vector, int rows, int cols, double* res){
+	__m128d *m = (__m128d*)matrix, *v = (__m128d*)vector, *r = (__m128d*)res;
+	for (int j = 0; j < cols / 2; j++)
+	{
+		r[j] = _mm_setr_pd(0, 0);
+	}
+
+	int len = rows*cols / 2;
+	int cols_ = cols / 2;
+	Concurrency::parallel_for(int(0), len, [&](int k){
+		int i = k - k%cols_;
+		int j = k%cols_;
+		r[j] = _mm_add_pd(r[j], _mm_mul_pd(m[i + j], v[j]));
+	});
 }
 
 void matrix_mul_vector_avx(double* matrix, double* vector, int rows, int cols, double* res){
@@ -387,7 +415,6 @@ void matrix_mul_vector_avx(double* matrix, double* vector, int rows, int cols, d
 
 void omp_matrix_mul_vector_avx(double* matrix, double* vector, int rows, int cols, double* res){
 	__m256d *m = (__m256d*)matrix, *v = (__m256d*)vector, *r = (__m256d*)res;
-#pragma omp parallel for
 	for (int j = 0; j < cols / 4; j++)
 	{
 		r[j] = _mm256_setzero_pd();
@@ -403,15 +430,36 @@ void omp_matrix_mul_vector_avx(double* matrix, double* vector, int rows, int col
 	}
 }
 
+void ppl_matrix_mul_vector_avx(double* matrix, double* vector, int rows, int cols, double* res){
+	__m256d *m = (__m256d*)matrix, *v = (__m256d*)vector, *r = (__m256d*)res;
+	for (int j = 0; j < cols / 4; j++)
+	{
+		r[j] = _mm256_setzero_pd();
+	}
+
+	int len = rows*cols / 4;
+	int cols_ = cols / 4;
+	Concurrency::parallel_for(int(0), len, [&](int k){
+		int i = k - k%cols_;
+		int j = k%cols_;
+		r[j] = _mm256_add_pd(r[j], _mm256_mul_pd(m[i + j], v[j]));
+	});
+}
+
 int compare_vector(double* v1, double* v2, int rows)
 {
 	int count = 0;
-	int len = rows;
 	for (int i = 0; i <rows; i++)
 	{
 		if (!areEqualMany(v1[i], v2[i])) count++;
 	}
 	return count;
+}
+
+void print_vector(double* v, int rows){
+	for (int i = 0; i < rows; i++){
+		printf("%f\n",v[i]);
+	}
 }
 
 void test_mul_vector()
@@ -424,13 +472,21 @@ void test_mul_vector()
 		double* vector = (double*)_aligned_malloc(sizeof(double)* len, 16);
 		double* res = (double*)_aligned_malloc(sizeof(double)* len, 16);
 		double* res_omp = (double*)_aligned_malloc(sizeof(double)* len, 16);
-		double* res_sse= (double*)_aligned_malloc(sizeof(double)* len, 16);
+		double* res_sse = (double*)_aligned_malloc(sizeof(double)* len, 16);
 		double* res_sse_omp = (double*)_aligned_malloc(sizeof(double)* len, 16);
+
+
+		int* matrix_int = (int*)_aligned_malloc(sizeof(int)* len * len, 16);
+		int* vector_int = (int*)_aligned_malloc(sizeof(int)* len, 16);
+		int* res_int = (int*)_aligned_malloc(sizeof(int)* len, 16);
+		int* res_omp_int = (int*)_aligned_malloc(sizeof(int)* len, 16);
 
 		for (int i = 0; i < len; ++i){
 			vector[i] = (double)(rand() % 3);
+			vector_int[i] = (int)(rand() % 3);
 			for (int j = 0; j < len; ++j){
 				matrix[i * len + j] = (double)(rand() % 3);
+				matrix_int[i * len + j] = (int)(rand() % 3);
 			}
 		}
 
@@ -448,6 +504,13 @@ void test_mul_vector()
 		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res, res_omp, len));
 
 		StartCounter();
+		ppl_matrix_mul_vector(matrix, vector, len, len, res_omp);
+		time_end = GetCounter();
+		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (PPL)\n"), len, len, len, time_end);
+
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res, res_omp, len));
+
+		StartCounter();
 		matrix_mul_vector_sse(matrix, vector, len, len, res_sse);
 		time_end = GetCounter();
 		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (SSE)\n"), len, len, len, time_end);
@@ -458,6 +521,14 @@ void test_mul_vector()
 		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (SSE OMP)\n"), len, len, len, time_end);
 
 		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res_sse, res_sse_omp, len));
+
+		StartCounter();
+		ppl_matrix_mul_vector_sse(matrix, vector, len, len, res_sse_omp);
+		time_end = GetCounter();
+		_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (SSE PPL)\n"), len, len, len, time_end);
+
+		_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res_sse, res_sse_omp, len));
+
 
 		if (avxSupported)
 		{
@@ -474,6 +545,14 @@ void test_mul_vector()
 			_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (AVX OMP)\n"), len, len, len, time_end);
 
 			_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res_avx, res_avx_omp, len));
+
+			StartCounter();
+			ppl_matrix_mul_vector_avx(matrix, vector, len, len, res_avx_omp);
+			time_end = GetCounter();
+			_tcprintf(_T("Time for multiple matrix %d x %d on vector %d: %f ms (AVX PPL)\n"), len, len, len, time_end);
+
+			_tcprintf(_T("--Count of different elements: %d\n"), compare_vector(res_avx, res_avx_omp, len));
+
 			_aligned_free(res_avx);
 			_aligned_free(res_avx_omp);
 		}
@@ -486,7 +565,13 @@ void test_mul_vector()
 		_aligned_free(res_sse_omp);
 		_aligned_free(res_sse);
 
+
+		_aligned_free(matrix_int);
+		_aligned_free(vector_int);
+		_aligned_free(res_int);
+		_aligned_free(res_omp_int);
 	}
+
 }
 
 #pragma endregion
@@ -690,8 +775,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	srand(time(0));
 	avx_support();
 	//test_max();
-	//test_mul_vector();
-	test_mul_matrix();
+	test_mul_vector();
+	//test_mul_matrix();
 	return 0;
 }
 
